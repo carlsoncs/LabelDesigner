@@ -102,7 +102,7 @@ function loadSavedState() {
 // Component
 // ============================================================================
 
-export default function LabelDesigner() {
+export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
   const saved = useRef(loadSavedState());
 
   const [labelSize, setLabelSize] = useState<LabelSize>(saved.current?.labelSize ?? LABEL_SIZES[0]);
@@ -444,13 +444,21 @@ export default function LabelDesigner() {
     try {
       const response = await fetch(`${API_BASE_URL}/print/zpl`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('zpl-auth-token')}`,
+        },
         body: JSON.stringify({
           zpl,
           printerIp,
           printerPort: parseInt(printerPort) || 9100,
         }),
       });
+
+      if (response.status === 401) {
+        onLogout();
+        return;
+      }
 
       const result = await response.json();
 
@@ -491,7 +499,7 @@ export default function LabelDesigner() {
 
         if (element.type === 'text') {
           const fontSizePt = element.fontSize.height * 0.75;
-          return `<div style="position:absolute; left:${xIn}in; top:${yIn}in; font-size:${fontSizePt}pt; font-family:monospace; font-weight:bold; transform:translateX(-50%);">${content}</div>`;
+          return `<div style="position:absolute; left:${xIn}in; top:${yIn}in; font-size:${fontSizePt}pt; font-family:monospace; font-weight:bold; white-space:nowrap; transform:translateX(-50%);">${content}</div>`;
         } else if (element.type === 'barcode') {
           return `
             <div style="position:absolute; left:${xIn}in; top:${yIn}in; text-align:center;">
@@ -640,6 +648,10 @@ export default function LabelDesigner() {
             onClick={handleClear}
             className={`px-3 py-1.5 ${c.btnDanger} border rounded text-xs font-medium transition-colors`}
           >Clear</button>
+          <button
+            onClick={onLogout}
+            className={`px-3 py-1.5 ${c.btn} border rounded text-xs font-medium transition-colors`}
+          >Logout</button>
         </div>
       </header>
 
@@ -758,6 +770,7 @@ export default function LabelDesigner() {
                       left: element.x,
                       top: element.y,
                       cursor: isDragging && selectedElement === element.id ? 'grabbing' : 'grab',
+                      transform: element.type === 'text' ? 'translateX(-50%)' : undefined,
                     }}
                     className={`absolute px-2 py-1 rounded-sm border border-dashed select-none transition-colors ${
                       selectedElement === element.id
@@ -766,8 +779,7 @@ export default function LabelDesigner() {
                     }`}
                   >
                     {element.type === 'text' ? (
-                      <div style={{ transform: 'translateX(-50%)' }}>
-                      {editingElement === element.id && !element.isVariable ? (
+                      editingElement === element.id && !element.isVariable ? (
                         <input
                           autoFocus
                           type="text"
@@ -787,8 +799,7 @@ export default function LabelDesigner() {
                         >
                           {getDisplayContent(element)}
                         </span>
-                      )}
-                      </div>
+                      )
                     ) : (
                       <div className="flex flex-col items-center gap-1">
                         <div className="flex gap-px items-end">

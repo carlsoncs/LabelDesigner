@@ -7,8 +7,7 @@ async function bootstrap() {
   
   // Enable CORS for development
   app.enableCors({
-    origin: ['http://localhost:5174', 'http://127.0.0.1:5174', 'https://labels.digitalharvest.tech'],
-    methods: ['GET', 'POST'],
+    origin: ['http://localhost:5174', 'https://labels.digitalharvest.tech', 'https://digitalharvest.tech'],
     credentials: true,
   });
 

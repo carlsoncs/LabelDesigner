@@ -1,9 +1,51 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import * as net from 'net';
+
+const IPV4_REGEX = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+const BLOCKED_IPS = ['127.0.0.1', '0.0.0.0', '255.255.255.255'];
+const MIN_PORT = 9100;
+const MAX_PORT = 9109;
 
 @Injectable()
 export class PrintService {
   private readonly logger = new Logger(PrintService.name);
+  private readonly allowedIps: string[] | null;
+
+  constructor(private configService: ConfigService) {
+    const allowList = this.configService.get<string>('ALLOWED_PRINTER_IPS');
+    if (allowList) {
+      this.allowedIps = allowList.split(',').map(ip => ip.trim()).filter(Boolean);
+      this.logger.log(`Printer IP whitelist active: ${this.allowedIps.join(', ')}`);
+    } else {
+      this.allowedIps = null;
+      this.logger.warn('No ALLOWED_PRINTER_IPS configured — any valid IP can be targeted');
+    }
+  }
+
+  private validatePrinterAddress(ip: string, port: number): void {
+    const match = ip.match(IPV4_REGEX);
+    if (!match) {
+      throw new BadRequestException('Invalid printer IP address format');
+    }
+
+    const octets = [parseInt(match[1]), parseInt(match[2]), parseInt(match[3]), parseInt(match[4])];
+    if (octets.some(o => o > 255)) {
+      throw new BadRequestException('Invalid printer IP address');
+    }
+
+    if (BLOCKED_IPS.includes(ip) || octets[0] === 0) {
+      throw new BadRequestException('Printer IP address not allowed');
+    }
+
+    if (this.allowedIps && !this.allowedIps.includes(ip)) {
+      throw new BadRequestException('Printer IP address not in allow list');
+    }
+
+    if (port < MIN_PORT || port > MAX_PORT) {
+      throw new BadRequestException(`Printer port must be between ${MIN_PORT} and ${MAX_PORT}`);
+    }
+  }
 
   /**
    * Send ZPL data to a Zebra printer over TCP
@@ -13,6 +55,7 @@ export class PrintService {
     printerIp: string,
     printerPort: number = 9100,
   ): Promise<{ bytesSent: number }> {
+    this.validatePrinterAddress(printerIp, printerPort);
     return new Promise((resolve, reject) => {
       const client = new net.Socket();
       const timeout = 10000; // 10 second timeout
@@ -66,6 +109,7 @@ export class PrintService {
     printerIp: string,
     printerPort: number = 9100,
   ): Promise<{ latencyMs: number }> {
+    this.validatePrinterAddress(printerIp, printerPort);
     return new Promise((resolve, reject) => {
       const startTime = Date.now();
       const client = new net.Socket();
