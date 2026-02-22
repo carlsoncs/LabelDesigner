@@ -21,6 +21,16 @@ interface BarcodeType {
   zpl: string;
 }
 
+interface FontFamily {
+  name: string;
+  css: string;
+}
+
+interface LineThickness {
+  name: string;
+  dots: number;
+}
+
 interface BaseElement {
   id: number;
   x: number;
@@ -33,6 +43,7 @@ interface BaseElement {
 interface TextElement extends BaseElement {
   type: 'text';
   fontSize: FontSize;
+  fontFamily: FontFamily;
 }
 
 interface BarcodeElement extends BaseElement {
@@ -43,7 +54,22 @@ interface BarcodeElement extends BaseElement {
   showText: boolean;
 }
 
-type LabelElement = TextElement | BarcodeElement;
+interface LineElement extends BaseElement {
+  type: 'line';
+  orientation: 'horizontal' | 'vertical';
+  thickness: LineThickness;
+  length: number;
+}
+
+interface BoxElement extends BaseElement {
+  type: 'box';
+  boxWidth: number;
+  boxHeight: number;
+  thickness: LineThickness;
+  cornerRadius: number;
+}
+
+type LabelElement = TextElement | BarcodeElement | LineElement | BoxElement;
 
 interface CsvRow {
   [key: string]: string;
@@ -82,6 +108,23 @@ const BARCODE_TYPES: BarcodeType[] = [
   { name: 'EAN-13', zpl: 'BE' },
 ];
 
+const FONT_FAMILIES: FontFamily[] = [
+  { name: 'Monospace', css: 'monospace' },
+  { name: 'Roboto', css: "'Roboto', sans-serif" },
+  { name: 'Open Sans', css: "'Open Sans', sans-serif" },
+  { name: 'Roboto Condensed', css: "'Roboto Condensed', sans-serif" },
+  { name: 'PT Sans Narrow', css: "'PT Sans Narrow', sans-serif" },
+  { name: 'Roboto Mono', css: "'Roboto Mono', monospace" },
+];
+
+const LINE_THICKNESSES: LineThickness[] = [
+  { name: 'Thin', dots: 2 },
+  { name: 'Medium', dots: 5 },
+  { name: 'Thick', dots: 10 },
+];
+
+const GOOGLE_FONTS_URL = 'https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;700&family=PT+Sans+Narrow:wght@400;700&family=Roboto:wght@400;700&family=Roboto+Condensed:wght@400;700&family=Roboto+Mono:wght@400;700&display=swap';
+
 // ============================================================================
 // API Configuration - Update this to match your setup
 // ============================================================================
@@ -117,6 +160,8 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
   const [activeTab, setActiveTab] = useState<'design' | 'data' | 'output'>('design');
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
+  const [isResizing, setIsResizing] = useState(false);
+  const resizeStart = useRef<{ mouseX: number; mouseY: number; origWidth: number; origHeight: number }>({ mouseX: 0, mouseY: 0, origWidth: 0, origHeight: 0 });
   const [editingElement, setEditingElement] = useState<number | null>(null);
   const [quantityColumn, setQuantityColumn] = useState(saved.current?.quantityColumn ?? '');
   const [printStatus, setPrintStatus] = useState<'idle' | 'printing' | 'success' | 'error'>('idle');
@@ -126,6 +171,7 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
   const canvasRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const designFileInputRef = useRef<HTMLInputElement>(null);
+  const printWindowRef = useRef<Window | null>(null);
 
   // Persist state to localStorage
   useEffect(() => {
@@ -137,6 +183,11 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
   useEffect(() => {
     localStorage.setItem(THEME_KEY, darkMode ? 'dark' : 'light');
   }, [darkMode]);
+
+  // Clear stale ZPL output when any input changes
+  useEffect(() => {
+    setGeneratedZpl('');
+  }, [elements, labelSize, csvData, quantityColumn]);
 
   // Theme colors
   const c = darkMode ? {
@@ -206,16 +257,23 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
   const canvasWidth = labelSize.width * DISPLAY_SCALE;
   const canvasHeight = labelSize.height * DISPLAY_SCALE;
 
+  // Safe initial Y: wrap within canvas bounds
+  const nextY = (spacing: number) => {
+    const raw = 20 + elements.length * spacing;
+    return raw < canvasHeight - 20 ? raw : 20 + (raw % Math.max(1, canvasHeight - 40));
+  };
+
   // Add a new text element
   const addTextElement = () => {
     const newElement: TextElement = {
       id: Date.now(),
       type: 'text',
       x: 20,
-      y: 20 + elements.length * 40,
+      y: nextY(40),
       content: 'New Text',
       labelName: '',
       fontSize: FONT_SIZES[1],
+      fontFamily: FONT_FAMILIES[0],
       isVariable: false,
     };
     setElements([...elements, newElement]);
@@ -228,7 +286,7 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
       id: Date.now(),
       type: 'barcode',
       x: 20,
-      y: 20 + elements.length * 60,
+      y: nextY(60),
       content: '123456789',
       labelName: '',
       barcodeType: BARCODE_TYPES[0],
@@ -239,6 +297,62 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
     };
     setElements([...elements, newElement]);
     setSelectedElement(newElement.id);
+  };
+
+  // Add a new line element
+  const addLineElement = () => {
+    const newElement: LineElement = {
+      id: Date.now(),
+      type: 'line',
+      x: 20,
+      y: nextY(40),
+      content: '',
+      labelName: '',
+      isVariable: false,
+      orientation: 'horizontal',
+      thickness: LINE_THICKNESSES[1],
+      length: 150,
+    };
+    setElements([...elements, newElement]);
+    setSelectedElement(newElement.id);
+  };
+
+  // Add a new box element
+  const addBoxElement = () => {
+    const newElement: BoxElement = {
+      id: Date.now(),
+      type: 'box',
+      x: 20,
+      y: nextY(40),
+      content: '',
+      labelName: '',
+      isVariable: false,
+      boxWidth: 150,
+      boxHeight: 100,
+      thickness: LINE_THICKNESSES[1],
+      cornerRadius: 0,
+    };
+    setElements([...elements, newElement]);
+    setSelectedElement(newElement.id);
+  };
+
+  // Layer ordering
+  const moveElementForward = (id: number) => {
+    const idx = elements.findIndex(el => el.id === id);
+    if (idx < elements.length - 1) {
+      const newElements = [...elements];
+      [newElements[idx], newElements[idx + 1]] = [newElements[idx + 1], newElements[idx]];
+      setElements(newElements);
+    }
+  };
+
+  const moveElementBack = (id: number) => {
+    const idx = elements.findIndex(el => el.id === id);
+    if (idx > 0) {
+      const newElements = [...elements];
+      [newElements[idx - 1], newElements[idx]] = [newElements[idx], newElements[idx - 1]];
+      setElements(newElements);
+    }
   };
 
   // Update element properties
@@ -297,7 +411,7 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
           row[header] = values[i] || '';
         });
         return row;
-      });
+      }).filter(row => Object.values(row).some(v => v !== ''));
 
       setCsvHeaders(headers);
       setCsvData(data);
@@ -307,6 +421,7 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
       if (qtyHeader) setQuantityColumn(qtyHeader);
     };
     reader.readAsText(file);
+    event.target.value = '';
   };
 
   // Get the display content for an element (with variable substitution)
@@ -317,6 +432,15 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
     const row = csvData[previewRow];
     return row[element.labelName] || `{${element.labelName}}`;
   };
+
+  // Helper: convert display px to ZPL dots
+  const pxToDots = (px: number): number => Math.round((px / DISPLAY_SCALE) * INCH_TO_DOTS);
+
+  // Helper: convert display px to inches
+  const pxToIn = (px: number): number => px / DISPLAY_SCALE;
+
+  // Helper: convert line thickness dots to display px
+  const thicknessToPx = (dots: number): number => Math.max(1, Math.round((dots / INCH_TO_DOTS) * DISPLAY_SCALE));
 
   // Generate ZPL for all labels
   const generateZpl = useCallback((): string => {
@@ -356,6 +480,19 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
             zpl += `^${element.barcodeType.zpl}N,${element.height},${element.showText ? 'Y' : 'N'},N,N`;
             zpl += `^FD${content}^FS\n`;
           }
+        } else if (element.type === 'line') {
+          const lenDots = pxToDots(element.length);
+          const thick = element.thickness.dots;
+          if (element.orientation === 'horizontal') {
+            zpl += `^FO${x},${y}^GB${lenDots},${thick},${thick},B,0^FS\n`;
+          } else {
+            zpl += `^FO${x},${y}^GB${thick},${lenDots},${thick},B,0^FS\n`;
+          }
+        } else if (element.type === 'box') {
+          const w = pxToDots(element.boxWidth);
+          const h = pxToDots(element.boxHeight);
+          const thick = element.thickness.dots;
+          zpl += `^FO${x},${y}^GB${w},${h},${thick},B,${element.cornerRadius}^FS\n`;
         }
       });
 
@@ -396,7 +533,53 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
 
   const handleMouseUp = () => {
     setIsDragging(false);
+    setIsResizing(false);
   };
+
+  // Resize handle: start
+  const handleResizeStart = (e: React.MouseEvent, elementId: number) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const element = elements.find(el => el.id === elementId);
+    if (!element) return;
+
+    let origWidth = 0;
+    let origHeight = 0;
+    if (element.type === 'line') {
+      origWidth = element.orientation === 'horizontal' ? element.length : 0;
+      origHeight = element.orientation === 'vertical' ? element.length : 0;
+    } else if (element.type === 'box') {
+      origWidth = element.boxWidth;
+      origHeight = element.boxHeight;
+    }
+
+    resizeStart.current = { mouseX: e.clientX, mouseY: e.clientY, origWidth, origHeight };
+    setSelectedElement(elementId);
+    setIsResizing(true);
+  };
+
+  // Resize handle: move
+  const handleResizeMove = useCallback((e: MouseEvent) => {
+    if (!isResizing || selectedElement === null) return;
+    const element = elements.find(el => el.id === selectedElement);
+    if (!element) return;
+
+    const dx = e.clientX - resizeStart.current.mouseX;
+    const dy = e.clientY - resizeStart.current.mouseY;
+
+    if (element.type === 'line') {
+      if (element.orientation === 'horizontal') {
+        updateElement(selectedElement, { length: Math.max(20, resizeStart.current.origWidth + dx) });
+      } else {
+        updateElement(selectedElement, { length: Math.max(20, resizeStart.current.origHeight + dy) });
+      }
+    } else if (element.type === 'box') {
+      updateElement(selectedElement, {
+        boxWidth: Math.max(20, resizeStart.current.origWidth + dx),
+        boxHeight: Math.max(20, resizeStart.current.origHeight + dy),
+      });
+    }
+  }, [isResizing, selectedElement, elements]);
 
   useEffect(() => {
     if (isDragging) {
@@ -408,6 +591,17 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
       };
     }
   }, [isDragging, handleMouseMove]);
+
+  useEffect(() => {
+    if (isResizing) {
+      window.addEventListener('mousemove', handleResizeMove);
+      window.addEventListener('mouseup', handleMouseUp);
+      return () => {
+        window.removeEventListener('mousemove', handleResizeMove);
+        window.removeEventListener('mouseup', handleMouseUp);
+      };
+    }
+  }, [isResizing, handleResizeMove]);
 
   // Download ZPL file
   const downloadZpl = () => {
@@ -481,6 +675,11 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
   };
 
   const handleBrowserPrint = () => {
+    // Close any previous print window to prevent stale labels lingering
+    if (printWindowRef.current && !printWindowRef.current.closed) {
+      printWindowRef.current.close();
+    }
+
     const rows = csvData && csvData.length > 0 ? csvData : [{}];
 
     const labelWidthIn = labelSize.width;
@@ -499,7 +698,8 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
 
         if (element.type === 'text') {
           const fontSizePt = element.fontSize.height * 0.75;
-          return `<div style="position:absolute; left:${xIn}in; top:${yIn}in; font-size:${fontSizePt}pt; font-family:monospace; font-weight:bold; white-space:nowrap; transform:translateX(-50%);">${content}</div>`;
+          const fontCss = element.fontFamily?.css || 'monospace';
+          return `<div style="position:absolute; left:${xIn}in; top:${yIn}in; font-size:${fontSizePt}pt; font-family:${fontCss}; font-weight:bold; white-space:nowrap; transform:translateX(-50%);">${content}</div>`;
         } else if (element.type === 'barcode') {
           return `
             <div style="position:absolute; left:${xIn}in; top:${yIn}in; text-align:center;">
@@ -507,6 +707,22 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
               ${element.showText ? `<div style="font-family:monospace; font-size:10px;">${content}</div>` : ''}
             </div>
           `;
+        } else if (element.type === 'line') {
+          const lenIn = pxToIn(element.length);
+          const thickIn = element.thickness.dots / INCH_TO_DOTS;
+          if (element.orientation === 'horizontal') {
+            return `<div style="position:absolute; left:${xIn}in; top:${yIn}in; width:${lenIn}in; height:${thickIn}in; background:black;"></div>`;
+          } else {
+            return `<div style="position:absolute; left:${xIn}in; top:${yIn}in; width:${thickIn}in; height:${lenIn}in; background:black;"></div>`;
+          }
+        } else if (element.type === 'box') {
+          const wIn = pxToIn(element.boxWidth);
+          const hIn = pxToIn(element.boxHeight);
+          const borderIn = element.thickness.dots / INCH_TO_DOTS;
+          const radiusIn = element.cornerRadius > 0
+            ? (element.cornerRadius / 8) * (Math.min(wIn, hIn) / 2)
+            : 0;
+          return `<div style="position:absolute; left:${xIn}in; top:${yIn}in; width:${wIn}in; height:${hIn}in; border:${borderIn}in solid black; box-sizing:border-box;${radiusIn > 0 ? ` border-radius:${radiusIn}in;` : ''}"></div>`;
         }
         return '';
       }).join('');
@@ -524,6 +740,7 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
       alert('Please allow popups to use browser print');
       return;
     }
+    printWindowRef.current = printWindow;
 
     printWindow.document.write(`
       <!DOCTYPE html>
@@ -531,6 +748,7 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
       <head>
         <title>Print Labels</title>
         <link href="https://fonts.googleapis.com/css2?family=Libre+Barcode+128&display=swap" rel="stylesheet">
+        <link href="${GOOGLE_FONTS_URL}" rel="stylesheet">
         <style>
           @page {
             size: ${labelWidthIn}in ${labelHeightIn}in;
@@ -553,7 +771,10 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
         ${labelsHtml}
         <script>
           window.onload = function() {
-            setTimeout(function() { window.print(); }, 500);
+            setTimeout(function() {
+              window.print();
+              window.close();
+            }, 500);
           };
         <\/script>
       </body>
@@ -611,6 +832,29 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
     };
     reader.readAsText(file);
     event.target.value = '';
+  };
+
+  // Element list icon helper
+  const getElementIcon = (el: LabelElement): string => {
+    switch (el.type) {
+      case 'text': return 'T';
+      case 'barcode': return '\u2586';
+      case 'line': return '\u2014';
+      case 'box': return '\u25A1';
+    }
+  };
+
+  // Element list label helper
+  const getElementLabel = (el: LabelElement): string => {
+    switch (el.type) {
+      case 'text':
+      case 'barcode':
+        return el.labelName || el.content.substring(0, 15);
+      case 'line':
+        return `${el.orientation === 'horizontal' ? 'H' : 'V'} Line (${el.thickness.name})`;
+      case 'box':
+        return `Box ${el.cornerRadius > 0 ? '(rounded)' : '(square)'}`;
+    }
   };
 
   const selectedEl = elements.find(el => el.id === selectedElement);
@@ -706,10 +950,24 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
                 </button>
                 <button
                   onClick={addBarcodeElement}
-                  className={`w-full px-3 py-2.5 ${c.btn} border rounded-md text-sm flex items-center gap-2 transition-colors`}
+                  className={`w-full px-3 py-2.5 ${c.btn} border rounded-md text-sm flex items-center gap-2 transition-colors mb-2`}
                 >
                   <span className={`w-5 h-5 flex items-center justify-center ${c.icon} rounded text-xs font-bold`}>&#9646;</span>
                   Add Barcode
+                </button>
+                <button
+                  onClick={addLineElement}
+                  className={`w-full px-3 py-2.5 ${c.btn} border rounded-md text-sm flex items-center gap-2 transition-colors mb-2`}
+                >
+                  <span className={`w-5 h-5 flex items-center justify-center ${c.icon} rounded text-xs font-bold`}>&mdash;</span>
+                  Add Line
+                </button>
+                <button
+                  onClick={addBoxElement}
+                  className={`w-full px-3 py-2.5 ${c.btn} border rounded-md text-sm flex items-center gap-2 transition-colors`}
+                >
+                  <span className={`w-5 h-5 flex items-center justify-center ${c.icon} rounded text-xs font-bold`}>&#9633;</span>
+                  Add Box
                 </button>
               </div>
 
@@ -728,9 +986,9 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
                           : c.elNormal
                       }`}
                     >
-                      <span>{el.type === 'text' ? 'T' : '&#9646;'}</span>
+                      <span>{getElementIcon(el)}</span>
                       <span className={`flex-1 truncate ${c.subtle}`}>
-                        {el.labelName || el.content.substring(0, 15)}
+                        {getElementLabel(el)}
                       </span>
                       <button
                         onClick={(e) => { e.stopPropagation(); deleteElement(el.id); }}
@@ -761,7 +1019,11 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
                 </svg>
 
                 {/* Elements */}
-                {elements.map((element) => (
+                {elements.map((element, idx) => {
+                  // Expand hit area for thin lines
+                  const hitPad = element.type === 'line' ? 6 : 0;
+                  const isHoriz = element.type === 'line' && element.orientation === 'horizontal';
+                  return (
                   <div
                     key={element.id}
                     onMouseDown={(e) => handleMouseDown(e, element.id)}
@@ -769,10 +1031,15 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
                     style={{
                       left: element.x,
                       top: element.y,
+                      zIndex: selectedElement === element.id ? elements.length + 1 : idx + 1,
                       cursor: isDragging && selectedElement === element.id ? 'grabbing' : 'grab',
                       transform: element.type === 'text' ? 'translateX(-50%)' : undefined,
+                      ...(hitPad > 0 ? (isHoriz
+                        ? { paddingTop: hitPad, paddingBottom: hitPad, marginTop: -hitPad }
+                        : { paddingLeft: hitPad, paddingRight: hitPad, marginLeft: -hitPad }
+                      ) : {}),
                     }}
-                    className={`absolute px-2 py-1 rounded-sm border border-dashed select-none transition-colors ${
+                    className={`absolute rounded-sm border border-dashed select-none transition-colors ${
                       selectedElement === element.id
                         ? 'border-emerald-500 bg-emerald-500/10'
                         : 'border-transparent'
@@ -788,19 +1055,26 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
                           onBlur={() => setEditingElement(null)}
                           onKeyDown={(e) => { if (e.key === 'Enter') setEditingElement(null); }}
                           onClick={(e) => e.stopPropagation()}
-                          style={{ fontSize: element.fontSize.height * 0.6, width: Math.max(60, element.content.length * element.fontSize.width * 0.4) }}
-                          className="font-mono font-bold text-black bg-white border border-emerald-500 outline-none px-0 py-0"
+                          style={{
+                            fontSize: element.fontSize.height * 0.6,
+                            width: Math.max(60, element.content.length * element.fontSize.width * 0.4),
+                            fontFamily: element.fontFamily?.css || 'monospace',
+                          }}
+                          className="font-bold text-black bg-white border border-emerald-500 outline-none px-0 py-0"
                         />
                       ) : (
                         <span
-                          style={{ fontSize: element.fontSize.height * 0.6 }}
-                          className="font-mono font-bold text-black whitespace-nowrap"
+                          style={{
+                            fontSize: element.fontSize.height * 0.6,
+                            fontFamily: element.fontFamily?.css || 'monospace',
+                          }}
+                          className="font-bold text-black whitespace-nowrap"
                           onDoubleClick={(e) => { e.stopPropagation(); setEditingElement(element.id); }}
                         >
                           {getDisplayContent(element)}
                         </span>
                       )
-                    ) : (
+                    ) : element.type === 'barcode' ? (
                       <div className="flex flex-col items-center gap-1">
                         <div className="flex gap-px items-end">
                           {[...Array(20)].map((_, i) => (
@@ -815,9 +1089,66 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
                           <span className="text-[10px] font-mono text-black">{getDisplayContent(element)}</span>
                         )}
                       </div>
-                    )}
+                    ) : element.type === 'line' ? (
+                      <div style={{ position: 'relative' }}>
+                        <div
+                          style={{
+                            width: element.orientation === 'horizontal' ? element.length : thicknessToPx(element.thickness.dots),
+                            height: element.orientation === 'vertical' ? element.length : thicknessToPx(element.thickness.dots),
+                            backgroundColor: 'black',
+                          }}
+                        />
+                        {selectedElement === element.id && (
+                          <div
+                            onMouseDown={(e) => handleResizeStart(e, element.id)}
+                            style={{
+                              position: 'absolute',
+                              ...(element.orientation === 'horizontal'
+                                ? { right: -4, top: '50%', transform: 'translateY(-50%)', cursor: 'ew-resize' }
+                                : { bottom: -4, left: '50%', transform: 'translateX(-50%)', cursor: 'ns-resize' }),
+                              width: 8,
+                              height: 8,
+                              backgroundColor: '#10b981',
+                              border: '1px solid white',
+                              borderRadius: 1,
+                            }}
+                          />
+                        )}
+                      </div>
+                    ) : element.type === 'box' ? (
+                      <div style={{ position: 'relative' }}>
+                        <div
+                          style={{
+                            width: element.boxWidth,
+                            height: element.boxHeight,
+                            border: `${Math.max(1, thicknessToPx(element.thickness.dots))}px solid black`,
+                            borderRadius: element.cornerRadius > 0
+                              ? `${(element.cornerRadius / 8) * (Math.min(element.boxWidth, element.boxHeight) / 2)}px`
+                              : 0,
+                            boxSizing: 'border-box',
+                          }}
+                        />
+                        {selectedElement === element.id && (
+                          <div
+                            onMouseDown={(e) => handleResizeStart(e, element.id)}
+                            style={{
+                              position: 'absolute',
+                              right: -4,
+                              bottom: -4,
+                              cursor: 'nwse-resize',
+                              width: 8,
+                              height: 8,
+                              backgroundColor: '#10b981',
+                              border: '1px solid white',
+                              borderRadius: 1,
+                            }}
+                          />
+                        )}
+                      </div>
+                    ) : null}
                   </div>
-                ))}
+                  );
+                })}
               </div>
 
               <p className={`text-xs ${c.muted}`}>
@@ -830,49 +1161,70 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
               {selectedEl ? (
                 <div className="flex flex-col gap-4">
                   <h3 className={`text-[11px] font-semibold uppercase tracking-wider ${c.label}`}>
-                    {selectedEl.type === 'text' ? 'Text' : 'Barcode'} Properties
+                    {selectedEl.type === 'text' ? 'Text' : selectedEl.type === 'barcode' ? 'Barcode' : selectedEl.type === 'line' ? 'Line' : 'Box'} Properties
                   </h3>
 
-                  <div className="flex flex-col gap-1.5">
-                    <label className={`text-[11px] font-medium ${c.label} uppercase tracking-wide`}>Label Name</label>
-                    <input
-                      type="text"
-                      value={selectedEl.labelName}
-                      onChange={(e) => updateElement(selectedEl.id, { labelName: e.target.value })}
-                      placeholder="e.g. SKU, Name, Price"
-                      className={`w-full px-3 py-2 ${c.input} rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500`}
-                    />
-                    {selectedEl.isVariable && (
-                      <p className={`text-[10px] ${c.muted}`}>Must match a CSV column name</p>
-                    )}
-                  </div>
+                  {/* Common: Label Name & Content (only for text/barcode) */}
+                  {(selectedEl.type === 'text' || selectedEl.type === 'barcode') && (
+                    <>
+                      <div className="flex flex-col gap-1.5">
+                        <label className={`text-[11px] font-medium ${c.label} uppercase tracking-wide`}>Label Name</label>
+                        <input
+                          type="text"
+                          value={selectedEl.labelName}
+                          onChange={(e) => updateElement(selectedEl.id, { labelName: e.target.value })}
+                          placeholder="e.g. SKU, Name, Price"
+                          className={`w-full px-3 py-2 ${c.input} rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500`}
+                        />
+                        {selectedEl.isVariable && (
+                          <p className={`text-[10px] ${c.muted}`}>Must match a CSV column name</p>
+                        )}
+                      </div>
 
-                  <div className="flex flex-col gap-1.5">
-                    <label className={`text-[11px] font-medium ${c.label} uppercase tracking-wide`}>Content</label>
-                    <input
-                      type="text"
-                      value={selectedEl.content}
-                      onChange={(e) => updateElement(selectedEl.id, { content: e.target.value })}
-                      disabled={selectedEl.isVariable}
-                      className={`w-full px-3 py-2 ${c.input} rounded-md text-sm disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-emerald-500`}
-                    />
-                  </div>
-
-                  {selectedEl.type === 'text' && (
-                    <div className="flex flex-col gap-1.5">
-                      <label className={`text-[11px] font-medium ${c.label} uppercase tracking-wide`}>Font Size</label>
-                      <select
-                        value={FONT_SIZES.findIndex(f => f.name === selectedEl.fontSize.name)}
-                        onChange={(e) => updateElement(selectedEl.id, { fontSize: FONT_SIZES[parseInt(e.target.value)] })}
-                        className={`w-full px-3 py-2 ${c.input} rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500`}
-                      >
-                        {FONT_SIZES.map((size, i) => (
-                          <option key={size.name} value={i}>{size.name}</option>
-                        ))}
-                      </select>
-                    </div>
+                      <div className="flex flex-col gap-1.5">
+                        <label className={`text-[11px] font-medium ${c.label} uppercase tracking-wide`}>Content</label>
+                        <input
+                          type="text"
+                          value={selectedEl.content}
+                          onChange={(e) => updateElement(selectedEl.id, { content: e.target.value })}
+                          disabled={selectedEl.isVariable}
+                          className={`w-full px-3 py-2 ${c.input} rounded-md text-sm disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-emerald-500`}
+                        />
+                      </div>
+                    </>
                   )}
 
+                  {/* Text-specific properties */}
+                  {selectedEl.type === 'text' && (
+                    <>
+                      <div className="flex flex-col gap-1.5">
+                        <label className={`text-[11px] font-medium ${c.label} uppercase tracking-wide`}>Font Family</label>
+                        <select
+                          value={FONT_FAMILIES.findIndex(f => f.name === (selectedEl.fontFamily?.name || 'Monospace'))}
+                          onChange={(e) => updateElement(selectedEl.id, { fontFamily: FONT_FAMILIES[parseInt(e.target.value)] })}
+                          className={`w-full px-3 py-2 ${c.input} rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500`}
+                        >
+                          {FONT_FAMILIES.map((font, i) => (
+                            <option key={font.name} value={i}>{font.name}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="flex flex-col gap-1.5">
+                        <label className={`text-[11px] font-medium ${c.label} uppercase tracking-wide`}>Font Size</label>
+                        <select
+                          value={FONT_SIZES.findIndex(f => f.name === selectedEl.fontSize.name)}
+                          onChange={(e) => updateElement(selectedEl.id, { fontSize: FONT_SIZES[parseInt(e.target.value)] })}
+                          className={`w-full px-3 py-2 ${c.input} rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500`}
+                        >
+                          {FONT_SIZES.map((size, i) => (
+                            <option key={size.name} value={i}>{size.name}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </>
+                  )}
+
+                  {/* Barcode-specific properties */}
                   {selectedEl.type === 'barcode' && (
                     <>
                       <div className="flex flex-col gap-1.5">
@@ -908,22 +1260,129 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
                     </>
                   )}
 
-                  <div className={`h-px ${c.divider} my-2`} />
-
-                  <label className={`flex items-center gap-2 text-sm ${c.subtle} cursor-pointer`}>
-                    <input
-                      type="checkbox"
-                      checked={selectedEl.isVariable}
-                      onChange={(e) => updateElement(selectedEl.id, { isVariable: e.target.checked })}
-                      className={`rounded ${c.checkbox}`}
-                    />
-                    Variable field (from CSV)
-                  </label>
-
-                  {selectedEl.isVariable && !selectedEl.labelName && (
-                    <p className="text-xs text-amber-500">Set a Label Name above to link to CSV data</p>
+                  {/* Line-specific properties */}
+                  {selectedEl.type === 'line' && (
+                    <>
+                      <div className="flex flex-col gap-1.5">
+                        <label className={`text-[11px] font-medium ${c.label} uppercase tracking-wide`}>Orientation</label>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => updateElement(selectedEl.id, { orientation: 'horizontal' })}
+                            className={`flex-1 px-3 py-2 border rounded-md text-sm font-medium transition-colors ${
+                              selectedEl.orientation === 'horizontal'
+                                ? 'bg-emerald-500 text-black border-emerald-500'
+                                : `${c.btn} border`
+                            }`}
+                          >Horizontal</button>
+                          <button
+                            onClick={() => updateElement(selectedEl.id, { orientation: 'vertical' })}
+                            className={`flex-1 px-3 py-2 border rounded-md text-sm font-medium transition-colors ${
+                              selectedEl.orientation === 'vertical'
+                                ? 'bg-emerald-500 text-black border-emerald-500'
+                                : `${c.btn} border`
+                            }`}
+                          >Vertical</button>
+                        </div>
+                      </div>
+                      <div className="flex flex-col gap-1.5">
+                        <label className={`text-[11px] font-medium ${c.label} uppercase tracking-wide`}>Thickness</label>
+                        <select
+                          value={LINE_THICKNESSES.findIndex(t => t.name === selectedEl.thickness.name)}
+                          onChange={(e) => updateElement(selectedEl.id, { thickness: LINE_THICKNESSES[parseInt(e.target.value)] })}
+                          className={`w-full px-3 py-2 ${c.input} rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500`}
+                        >
+                          {LINE_THICKNESSES.map((t, i) => (
+                            <option key={t.name} value={i}>{t.name} ({t.dots} dots)</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="flex flex-col gap-1.5">
+                        <label className={`text-[11px] font-medium ${c.label} uppercase tracking-wide`}>Length (px)</label>
+                        <input
+                          type="number"
+                          value={selectedEl.length}
+                          onChange={(e) => updateElement(selectedEl.id, { length: Math.max(10, parseInt(e.target.value) || 50) })}
+                          className={`w-full px-3 py-2 ${c.input} rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500`}
+                        />
+                      </div>
+                    </>
                   )}
 
+                  {/* Box-specific properties */}
+                  {selectedEl.type === 'box' && (
+                    <>
+                      <div className="flex flex-col gap-1.5">
+                        <label className={`text-[11px] font-medium ${c.label} uppercase tracking-wide`}>Width (px)</label>
+                        <input
+                          type="number"
+                          value={selectedEl.boxWidth}
+                          onChange={(e) => updateElement(selectedEl.id, { boxWidth: Math.max(10, parseInt(e.target.value) || 50) })}
+                          className={`w-full px-3 py-2 ${c.input} rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500`}
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1.5">
+                        <label className={`text-[11px] font-medium ${c.label} uppercase tracking-wide`}>Height (px)</label>
+                        <input
+                          type="number"
+                          value={selectedEl.boxHeight}
+                          onChange={(e) => updateElement(selectedEl.id, { boxHeight: Math.max(10, parseInt(e.target.value) || 50) })}
+                          className={`w-full px-3 py-2 ${c.input} rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500`}
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1.5">
+                        <label className={`text-[11px] font-medium ${c.label} uppercase tracking-wide`}>Thickness</label>
+                        <select
+                          value={LINE_THICKNESSES.findIndex(t => t.name === selectedEl.thickness.name)}
+                          onChange={(e) => updateElement(selectedEl.id, { thickness: LINE_THICKNESSES[parseInt(e.target.value)] })}
+                          className={`w-full px-3 py-2 ${c.input} rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500`}
+                        >
+                          {LINE_THICKNESSES.map((t, i) => (
+                            <option key={t.name} value={i}>{t.name} ({t.dots} dots)</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="flex flex-col gap-1.5">
+                        <label className={`text-[11px] font-medium ${c.label} uppercase tracking-wide`}>Corner Rounding</label>
+                        <div className="flex items-center gap-3">
+                          <input
+                            type="range"
+                            min="0"
+                            max="8"
+                            value={selectedEl.cornerRadius}
+                            onChange={(e) => updateElement(selectedEl.id, { cornerRadius: parseInt(e.target.value) })}
+                            className="flex-1"
+                          />
+                          <span className={`text-xs ${c.subtle} w-16 text-right`}>
+                            {selectedEl.cornerRadius === 0 ? 'Square' : `${selectedEl.cornerRadius}/8`}
+                          </span>
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {/* Divider + variable/position for text/barcode */}
+                  {(selectedEl.type === 'text' || selectedEl.type === 'barcode') && (
+                    <>
+                      <div className={`h-px ${c.divider} my-2`} />
+
+                      <label className={`flex items-center gap-2 text-sm ${c.subtle} cursor-pointer`}>
+                        <input
+                          type="checkbox"
+                          checked={selectedEl.isVariable}
+                          onChange={(e) => updateElement(selectedEl.id, { isVariable: e.target.checked })}
+                          className={`rounded ${c.checkbox}`}
+                        />
+                        Variable field (from CSV)
+                      </label>
+
+                      {selectedEl.isVariable && !selectedEl.labelName && (
+                        <p className="text-xs text-amber-500">Set a Label Name above to link to CSV data</p>
+                      )}
+                    </>
+                  )}
+
+                  {/* Position (all element types) */}
+                  <div className={`h-px ${c.divider} my-2`} />
                   <div className="flex flex-col gap-1.5">
                     <label className={`text-[11px] font-medium ${c.label} uppercase tracking-wide`}>Position</label>
                     <div className="flex gap-3">
@@ -946,6 +1405,26 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
                         />
                       </div>
                     </div>
+                  </div>
+
+                  {/* Layer ordering */}
+                  <div className="flex flex-col gap-1.5">
+                    <label className={`text-[11px] font-medium ${c.label} uppercase tracking-wide`}>Layer Order</label>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => moveElementBack(selectedEl.id)}
+                        disabled={elements.findIndex(el => el.id === selectedEl.id) === 0}
+                        className={`flex-1 px-3 py-1.5 ${c.btn} border rounded-md text-xs font-medium transition-colors disabled:opacity-30`}
+                      >Send Back</button>
+                      <button
+                        onClick={() => moveElementForward(selectedEl.id)}
+                        disabled={elements.findIndex(el => el.id === selectedEl.id) === elements.length - 1}
+                        className={`flex-1 px-3 py-1.5 ${c.btn} border rounded-md text-xs font-medium transition-colors disabled:opacity-30`}
+                      >Bring Fwd</button>
+                    </div>
+                    <p className={`text-[10px] ${c.muted}`}>
+                      Layer {elements.findIndex(el => el.id === selectedEl.id) + 1} of {elements.length}
+                    </p>
                   </div>
                 </div>
               ) : (
