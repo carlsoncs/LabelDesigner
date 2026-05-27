@@ -424,25 +424,55 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
     if (selectedElement === id) setSelectedElement(null);
   };
 
-  // Parse a CSV line handling quotes
-  const parseCSVLine = (line: string): string[] => {
-    const result: string[] = [];
-    let current = '';
+  // RFC-4180 CSV parser. Walks the whole document char-by-char so a newline
+  // INSIDE a quoted field is treated as field content, not a row break — the
+  // old line-split-first approach destroyed embedded newlines before they
+  // could reach the renderer. Handles "" escaped quotes and \r\n / \r / \n
+  // row terminators. Quoted fields are kept verbatim (no trim, so multi-line
+  // values survive intact); unquoted fields are trimmed to preserve the
+  // prior whitespace-tolerance for ordinary cells.
+  const parseCSV = (text: string): string[][] => {
+    const rows: string[][] = [];
+    let row: string[] = [];
+    let field = '';
     let inQuotes = false;
+    let fieldWasQuoted = false;
+    let i = 0;
 
-    for (let i = 0; i < line.length; i++) {
-      const char = line[i];
-      if (char === '"') {
-        inQuotes = !inQuotes;
-      } else if (char === ',' && !inQuotes) {
-        result.push(current.trim());
-        current = '';
-      } else {
-        current += char;
+    const pushField = () => {
+      row.push(fieldWasQuoted ? field : field.trim());
+      field = '';
+      fieldWasQuoted = false;
+    };
+    const pushRow = () => {
+      pushField();
+      // Skip fully-empty rows (e.g. trailing blank line at EOF).
+      if (!(row.length === 1 && row[0] === '')) rows.push(row);
+      row = [];
+    };
+
+    while (i < text.length) {
+      const ch = text[i];
+      if (inQuotes) {
+        if (ch === '"') {
+          if (text[i + 1] === '"') { field += '"'; i += 2; continue; } // escaped quote
+          inQuotes = false; i++; continue;
+        }
+        field += ch; i++; continue;
       }
+      if (ch === '"') { inQuotes = true; fieldWasQuoted = true; i++; continue; }
+      if (ch === ',') { pushField(); i++; continue; }
+      if (ch === '\r') { // \r or \r\n row terminator
+        pushRow();
+        i += text[i + 1] === '\n' ? 2 : 1;
+        continue;
+      }
+      if (ch === '\n') { pushRow(); i++; continue; }
+      field += ch; i++;
     }
-    result.push(current.trim());
-    return result;
+    // Flush the final field/row if the file didn't end with a newline.
+    if (field !== '' || row.length > 0) pushRow();
+    return rows;
   };
 
   // Handle CSV file upload
@@ -453,15 +483,14 @@ export default function LabelDesigner({ onLogout }: { onLogout: () => void }) {
     const reader = new FileReader();
     reader.onload = (e) => {
       const text = e.target?.result as string;
-      const lines = text.split('\n').filter(line => line.trim());
-      if (lines.length < 2) {
+      const parsed = parseCSV(text);
+      if (parsed.length < 2) {
         alert('CSV must have at least a header row and one data row');
         return;
       }
 
-      const headers = parseCSVLine(lines[0]);
-      const data = lines.slice(1).map(line => {
-        const values = parseCSVLine(line);
+      const headers = parsed[0];
+      const data = parsed.slice(1).map(values => {
         const row: CsvRow = {};
         headers.forEach((header, i) => {
           row[header] = values[i] || '';
